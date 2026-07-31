@@ -2,6 +2,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import math
+import random
+import time
 
 # Access solutions safely across MediaPipe versions
 try:
@@ -39,22 +41,18 @@ def is_spiderman_gesture(hand_landmarks):
     return index_open and pinky_open and middle_closed and ring_closed
 
 def draw_spider_web(img, start_point, target_point, progress=1.0):
-    """
-    Draws a realistic animated spider web stream from start_point towards target_point.
-    """
+    """Draws an animated spider web stream from start_point towards target_point."""
     sx, sy = start_point
     tx, ty = target_point
 
-    # Calculate current end point based on animation progress
     curr_tx = int(sx + (tx - sx) * progress)
     curr_ty = int(sy + (ty - sy) * progress)
 
-    # Main web core (bright white center line)
+    # Core web lines
     cv2.line(img, (sx, sy), (curr_tx, curr_ty), (255, 255, 255), 4)
-    # Web glow/outer line
     cv2.line(img, (sx, sy), (curr_tx, curr_ty), (200, 200, 255), 1)
 
-    # Draw branching web strands
+    # Branching web strands
     angle = math.atan2(curr_ty - sy, curr_tx - sx)
     length = math.hypot(curr_tx - sx, curr_ty - sy)
 
@@ -64,7 +62,6 @@ def draw_spider_web(img, start_point, target_point, progress=1.0):
         bx = int(sx + dist * math.cos(angle))
         by = int(sy + dist * math.sin(angle))
 
-        # Side web flares
         flare_len = int(15 * (i / num_branches))
         perp_angle1 = angle + math.pi / 3
         perp_angle2 = angle - math.pi / 3
@@ -77,18 +74,44 @@ def draw_spider_web(img, start_point, target_point, progress=1.0):
         cv2.line(img, (bx, by), (fx1, fy1), (240, 240, 255), 1)
         cv2.line(img, (bx, by), (fx2, fy2), (240, 240, 255), 1)
 
-    # Web impact circle at target point
     if progress >= 0.9:
         cv2.circle(img, (curr_tx, curr_ty), 12, (255, 255, 255), 2)
         cv2.circle(img, (curr_tx, curr_ty), 5, (0, 255, 255), -1)
 
-# Start webcam capture
-cap = cv2.VideoCapture(0)
+    return (curr_tx, curr_ty)
 
-# Animation tracker dict for active webs: {hand_id: frame_count}
+def line_point_distance(line_start, line_end, point):
+    """Calculates perpendicular distance between a point and a line segment."""
+    px, py = point
+    x1, y1 = line_start
+    x2, y2 = line_end
+
+    line_len_sq = (x2 - x1)**2 + (y2 - y1)**2
+    if line_len_sq == 0:
+        return math.hypot(px - x1, py - y1)
+
+    t = max(0, min(1, ((px - x1)*(x2 - x1) + (py - y1)*(y2 - y1)) / line_len_sq))
+    proj_x = x1 + t * (x2 - x1)
+    proj_y = y1 + t * (y2 - y1)
+
+    return math.hypot(px - proj_x, py - proj_y)
+
+# Game State Variables
+score = 0
+targets = []  # [{ 'pos': [x, y], 'vel': [vx, vy], 'radius': 25, 'hit_time': 0 }]
+
+def spawn_target(w, h):
+    x = random.randint(100, w - 100)
+    y = random.randint(100, h // 2)
+    vx = random.choice([-3, -2, 2, 3])
+    vy = random.choice([-2, -1, 1, 2])
+    return {'pos': [x, y], 'vel': [vx, vy], 'radius': 30, 'hit_time': None}
+
+# Initialize camera
+cap = cv2.VideoCapture(0)
 web_animation_frames = {}
 
-print("Starting Spider-Man Web Shooter with Animated Webs! Press 'q' to quit.")
+print("Spider-Man Game Started! Aim and shoot floating targets with 🤟. Press 'q' to quit.")
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -98,18 +121,31 @@ while cap.isOpened():
     frame = cv2.flip(frame, 1)
     h, w, c = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
-    results = hands.process(rgb_frame)
 
+    # Spawn targets if fewer than 3 on screen
+    while len(targets) < 3:
+        targets.append(spawn_target(w, h))
+
+    # Update target movement physics
+    for t in targets:
+        if t['hit_time'] is None:
+            t['pos'][0] += t['vel'][0]
+            t['pos'][1] += t['vel'][1]
+
+            # Bounce off screen walls
+            if t['pos'][0] - t['radius'] <= 0 or t['pos'][0] + t['radius'] >= w:
+                t['vel'][0] *= -1
+            if t['pos'][1] - t['radius'] <= 0 or t['pos'][1] + t['radius'] >= h - 150:
+                t['vel'][1] *= -1
+
+    results = hands.process(rgb_frame)
     current_hands_shooting = []
 
     if results.multi_hand_landmarks:
         for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
             # Draw skeleton
             mp_drawing.draw_landmarks(
-                frame, 
-                hand_landmarks, 
-                mp_hands.HAND_CONNECTIONS,
+                frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
                 mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=3),
                 mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=1)
             )
@@ -117,43 +153,71 @@ while cap.isOpened():
             if is_spiderman_gesture(hand_landmarks):
                 current_hands_shooting.append(idx)
 
-                # Web source position: Wrist (0)
                 wrist_x = int(hand_landmarks.landmark[0].x * w)
                 wrist_y = int(hand_landmarks.landmark[0].y * h)
-
-                # Direction calculated from wrist through middle finger base (9)
                 mid_x = int(hand_landmarks.landmark[9].x * w)
                 mid_y = int(hand_landmarks.landmark[9].y * h)
 
-                # Calculate shooting angle outwards
                 dx = mid_x - wrist_x
                 dy = mid_y - wrist_y
                 norm = math.hypot(dx, dy) + 1e-5
                 dir_x = dx / norm
                 dir_y = dy / norm
 
-                # Target point far along the gesture direction
-                target_x = int(wrist_x + dir_x * 800)
-                target_y = int(wrist_y + dir_y * 800)
+                target_x = int(wrist_x + dir_x * 900)
+                target_y = int(wrist_y + dir_y * 900)
 
-                # Increment web shoot progress
                 anim_frame = web_animation_frames.get(idx, 0) + 1
                 web_animation_frames[idx] = anim_frame
-                progress = min(1.0, anim_frame / 5.0)  # Reaches full distance in 5 frames
+                progress = min(1.0, anim_frame / 4.0)
 
-                # Draw web graphic
-                draw_spider_web(frame, (wrist_x, wrist_y), (target_x, target_y), progress)
+                # Draw web line
+                web_end = draw_spider_web(frame, (wrist_x, wrist_y), (target_x, target_y), progress)
 
-                # "THWIP!" HUD text overlay (Fixed OpenCV font constant)
+                # Check collision with targets
+                for t in targets:
+                    if t['hit_time'] is None:
+                        dist = line_point_distance((wrist_x, wrist_y), web_end, t['pos'])
+                        if dist <= t['radius'] + 10:
+                            t['hit_time'] = time.time()
+                            score += 100
+
+                # THWIP Text
                 cv2.putText(frame, "THWIP!", (wrist_x - 40, wrist_y - 20),
-                            cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 255, 255), 3)
+                            cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 255, 255), 3)
                 cv2.putText(frame, "THWIP!", (wrist_x - 40, wrist_y - 20),
-                            cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 0, 255), 1)
+                            cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 0, 255), 1)
 
-    # Clean up inactive hand animations
+    # Render Targets & Web Hit Effects
+    curr_time = time.time()
+    active_targets = []
+
+    for t in targets:
+        tx, ty = int(t['pos'][0]), int(t['pos'][1])
+        if t['hit_time'] is None:
+            # Draw active target (Green Target Orb)
+            cv2.circle(frame, (tx, ty), t['radius'], (0, 255, 0), -1)
+            cv2.circle(frame, (tx, ty), t['radius'] + 4, (255, 255, 255), 2)
+            cv2.circle(frame, (tx, ty), 8, (0, 0, 255), -1)
+            active_targets.append(t)
+        else:
+            # Web splat effect on hit
+            elapsed = curr_time - t['hit_time']
+            if elapsed < 0.4:  # Splat effect duration
+                cv2.circle(frame, (tx, ty), t['radius'] + 15, (255, 255, 255), -1)
+                cv2.putText(frame, "+100", (tx - 25, ty - 35),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 255, 255), 2)
+                active_targets.append(t)
+
+    targets = active_targets
     web_animation_frames = {k: v for k, v in web_animation_frames.items() if k in current_hands_shooting}
 
-    cv2.imshow('Spider-Man Web Shooter', frame)
+    # HUD Banner (Scoreboard)
+    cv2.rectangle(frame, (0, 0), (w, 50), (20, 20, 20), -1)
+    cv2.putText(frame, f"SPIDER-MAN WEB SHOOTER | SCORE: {score}", (20, 35),
+                cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 255, 255), 2)
+
+    cv2.imshow('Spider-Man Web Shooter Game', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
