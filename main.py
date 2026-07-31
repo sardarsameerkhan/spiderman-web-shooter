@@ -32,17 +32,17 @@ face_mesh = mp_face_mesh.FaceMesh(
 
 stuck_screen_webs = []
 
-# Suit Color Themes (BGR Color Format)
+# Suit Color Themes (BGR)
 SUIT_THEMES = {
-    '1': {  # Classic Parker
+    '1': {
         'name': 'Classic Red',
         'mask_color': (25, 25, 195),
-        'rim_color': (10, 10, 10),
+        'rim_color': (15, 15, 15),
         'lens_color': (245, 245, 245),
         'web_color': (15, 15, 15),
         'alpha': 0.65
     },
-    '2': {  # Miles Morales
+    '2': {
         'name': 'Miles Morales (Stealth)',
         'mask_color': (18, 18, 22),
         'rim_color': (15, 15, 210),
@@ -50,15 +50,15 @@ SUIT_THEMES = {
         'web_color': (20, 20, 180),
         'alpha': 0.85
     },
-    '3': {  # Iron Spider
+    '3': {
         'name': 'Iron Spider (Armor)',
         'mask_color': (20, 20, 150),
-        'rim_color': (30, 190, 230), # Metallic Gold Rim
+        'rim_color': (30, 190, 230),
         'lens_color': (220, 250, 255),
         'web_color': (20, 160, 200),
         'alpha': 0.70
     },
-    '4': {  # Symbiote Black
+    '4': {
         'name': 'Symbiote Black',
         'mask_color': (10, 10, 12),
         'rim_color': (60, 60, 65),
@@ -71,60 +71,90 @@ SUIT_THEMES = {
 current_suit_key = '1'
 
 def is_open_palm(hand_landmarks):
-    """Detects open palm."""
     tips = [8, 12, 16, 20]
     pips = [6, 10, 14, 18]
     return all(hand_landmarks.landmark[tip].y < hand_landmarks.landmark[pip].y for tip, pip in zip(tips, pips))
 
 def is_spiderman_gesture(hand_landmarks):
-    """Detects Spider-Man thwip gesture."""
     index_open = hand_landmarks.landmark[8].y < hand_landmarks.landmark[6].y
     pinky_open = hand_landmarks.landmark[20].y < hand_landmarks.landmark[18].y
     middle_closed = hand_landmarks.landmark[12].y > hand_landmarks.landmark[10].y
     ring_closed = hand_landmarks.landmark[16].y > hand_landmarks.landmark[14].y
     return index_open and pinky_open and middle_closed and ring_closed
 
+def build_angular_spidey_lens(inner_corner, top_brow, outer_temple, bottom_cheek):
+    """
+    Constructs a stylized sharp, upward-swept 6-point Spider-Man lens polygon 
+    from facial anchor points.
+    """
+    ix, iy = inner_corner
+    tx, ty = top_brow
+    ox, oy = outer_temple
+    bx, by = bottom_cheek
+
+    # Sharp top sweep toward temple
+    p1 = (ix, iy)
+    p2 = (int(ix * 0.4 + tx * 0.6), int(ty - 10))
+    p3 = (int(ox + 15), int(oy - 20)) # Sharp outer top wing tip
+    p4 = (int(ox + 5), int(oy + 15))   # Outer lower edge
+    p5 = (int(bx), int(by + 10))       # Bottom curve point
+    p6 = (int(ix * 0.7 + bx * 0.3), int(iy * 0.5 + by * 0.5))
+
+    return np.array([p1, p2, p3, p4, p5, p6], np.int32)
+
 def draw_photorealistic_mask(img, face_landmarks, h, w, theme):
-    """Generates a realistic 3D suit mask with dynamic lighting, eye lenses, and web matrix."""
     pts = face_landmarks.landmark
 
-    # 1. Full Outer Face Contour Landmark Map
+    # 1. Base Mask Red Overlay
     jaw_indices = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
     face_contour = np.array([(int(pts[i].x * w), int(pts[i].y * h)) for i in jaw_indices], np.int32)
 
-    # Shading Overlay Mask
     mask_layer = img.copy()
     cv2.fillPoly(mask_layer, [face_contour], theme['mask_color'])
-    
-    # Smooth alpha blending to retain natural skin lighting and jaw depth
     cv2.addWeighted(mask_layer, theme['alpha'], img, 1.0 - theme['alpha'], 0, img)
 
-    # 2. Angular Spider-Man Eye Lenses (Left & Right)
-    left_eye_indices = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]
-    right_eye_indices = [362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382]
+    # 2. Extract Structural Eye Anchors
+    # Left Eye Anchors
+    l_inner = (int(pts[133].x * w), int(pts[133].y * h))
+    l_top = (int(pts[159].x * w), int(pts[159].y * h))
+    l_outer = (int(pts[33].x * w), int(pts[33].y * h))
+    l_bottom = (int(pts[145].x * w), int(pts[145].y * h))
 
-    left_pts = np.array([(int(pts[i].x * w), int(pts[i].y * h)) for i in left_eye_indices], np.int32)
-    right_pts = np.array([(int(pts[i].x * w), int(pts[i].y * h)) for i in right_eye_indices], np.int32)
+    # Right Eye Anchors
+    r_inner = (int(pts[362].x * w), int(pts[362].y * h))
+    r_top = (int(pts[386].x * w), int(pts[386].y * h))
+    r_outer = (int(pts[263].x * w), int(pts[263].y * h))
+    r_bottom = (int(pts[374].x * w), int(pts[374].y * h))
 
-    # Scale lenses to produce cinematic wide eyes
-    scale_poly = lambda poly, factor: np.int32((poly - np.mean(poly, axis=0)) * factor + np.mean(poly, axis=0))
-    l_lens_outer = scale_poly(left_pts, 1.65)
-    r_lens_outer = scale_poly(right_pts, 1.65)
-    
-    l_lens_inner = scale_poly(left_pts, 1.30)
-    r_lens_inner = scale_poly(right_pts, 1.30)
+    # Generate Left & Right Angular Spider-Man Lenses
+    l_lens = build_angular_spidey_lens(l_inner, l_top, l_outer, l_bottom)
+    r_lens = build_angular_spidey_lens(r_inner, r_top, r_outer, r_bottom)
 
-    # Outer Thick Rim Frame
+    # Function to scale polygon around its centroid for rim thickness
+    def scale_lens(poly, factor):
+        centroid = np.mean(poly, axis=0)
+        return np.int32((poly - centroid) * factor + centroid)
+
+    l_lens_outer = scale_lens(l_lens, 1.35)
+    r_lens_outer = scale_lens(r_lens, 1.35)
+
+    l_lens_mid = scale_lens(l_lens, 1.15)
+    r_lens_mid = scale_lens(r_lens, 1.15)
+
+    # Draw Outer Black/Gold Heavy Bevel Frame
     cv2.fillPoly(img, [l_lens_outer], theme['rim_color'])
     cv2.fillPoly(img, [r_lens_outer], theme['rim_color'])
 
-    # Inner Reflective White Lens Surface
-    cv2.fillPoly(img, [l_lens_inner], theme['lens_color'])
-    cv2.fillPoly(img, [r_lens_inner], theme['lens_color'])
+    # Inner Lens Base White/Silver Fill
+    cv2.fillPoly(img, [l_lens], theme['lens_color'])
+    cv2.fillPoly(img, [r_lens], theme['lens_color'])
 
-    # Glass Lens Highlights
-    cv2.polylines(img, [l_lens_inner], True, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.polylines(img, [r_lens_inner], True, (255, 255, 255), 2, cv2.LINE_AA)
+    # Sharp Rim Lines & Glass Reflections
+    cv2.polylines(img, [l_lens_outer], True, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.polylines(img, [r_lens_outer], True, (0, 0, 0), 2, cv2.LINE_AA)
+    
+    cv2.polylines(img, [l_lens], True, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.polylines(img, [r_lens], True, (255, 255, 255), 2, cv2.LINE_AA)
 
     # 3. Facial Cobweb Mesh Lines
     nose_x, nose_y = int(pts[1].x * w), int(pts[1].y * h)
@@ -134,31 +164,21 @@ def draw_photorealistic_mask(img, face_landmarks, h, w, theme):
     for idx in web_anchors:
         ax, ay = int(pts[idx].x * w), int(pts[idx].y * h)
         anchor_coords.append((ax, ay))
-        # Radial web spokes coming from nose bridge
         cv2.line(img, (nose_x, nose_y), (ax, ay), theme['web_color'], 1, cv2.LINE_AA)
 
-    # Concentric curved web rings
     num_anchors = len(anchor_coords)
     for r in [0.30, 0.55, 0.80]:
-        ring_pts = []
-        for ax, ay in anchor_coords:
-            rx = int(nose_x + (ax - nose_x) * r)
-            ry = int(nose_y + (ay - nose_y) * r)
-            ring_pts.append((rx, ry))
+        ring_pts = [(int(nose_x + (ax - nose_x) * r), int(nose_y + (ay - nose_y) * r)) for ax, ay in anchor_coords]
 
         for i in range(num_anchors):
-            p1 = ring_pts[i]
-            p2 = ring_pts[(i + 1) % num_anchors]
+            p1, p2 = ring_pts[i], ring_pts[(i + 1) % num_anchors]
             ctrl_x = int((p1[0] + p2[0]) * 0.45 + nose_x * 0.1)
             ctrl_y = int((p1[1] + p2[1]) * 0.45 + nose_y * 0.1)
-            curve = np.array([p1, (ctrl_x, ctrl_y), p2], np.int32)
-            cv2.polylines(img, [curve], False, theme['web_color'], 1, cv2.LINE_AA)
+            cv2.polylines(img, [np.array([p1, (ctrl_x, ctrl_y), p2], np.int32)], False, theme['web_color'], 1, cv2.LINE_AA)
 
 def draw_hand_palm_web(img, center, radius):
-    """Draws palm web matrix."""
     cx, cy = center
-    num_spokes = 8
-    rings = 4
+    num_spokes, rings = 8, 4
 
     cv2.circle(img, (cx, cy), int(radius * 1.1), (255, 255, 255), 1)
     spoke_angles = [i * (2 * math.pi / num_spokes) for i in range(num_spokes)]
@@ -179,7 +199,6 @@ def draw_hand_palm_web(img, center, radius):
             cv2.polylines(img, [np.array([p1, (mid_x, mid_y), p2])], False, (220, 220, 255), 1, cv2.LINE_AA)
 
 def draw_cinematic_web_stream(img, start_pt, end_pt):
-    """Renders turbulent web stream."""
     sx, sy = start_pt
     ex, ey = end_pt
     dist = math.hypot(ex - sx, ey - sy)
@@ -209,7 +228,6 @@ def draw_cinematic_web_stream(img, start_pt, end_pt):
             cv2.line(img, pt, (offset_x, offset_y), (220, 220, 255), 1, cv2.LINE_AA)
 
 def create_photorealistic_splat(x, y):
-    """Generates screen impact web splat."""
     num_spokes = random.randint(9, 13)
     max_radius = random.randint(150, 220)
     spokes = []
@@ -225,7 +243,6 @@ def create_photorealistic_splat(x, y):
     return {'x': x, 'y': y, 'radius': max_radius, 'spokes': spokes, 'droplets': droplets, 'time': time.time()}
 
 def draw_photorealistic_stuck_web(img, web, alpha):
-    """Renders 3D screen webs."""
     cx, cy, spokes = web['x'], web['y'], web['spokes']
     num_spokes = len(spokes)
     overlay = img.copy()
@@ -252,11 +269,11 @@ def draw_photorealistic_stuck_web(img, web, alpha):
 
     cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
 
-# Main Loop
+# Main Application Loop
 cap = cv2.VideoCapture(0)
 last_shot_time = 0
 
-print("Spider-Man Suite Switcher Active!")
+print("Spider-Man Mask Active!")
 print("Press 1: Classic Red | 2: Miles Morales | 3: Iron Spider | 4: Symbiote | Q: Quit")
 
 while cap.isOpened():
@@ -270,13 +287,13 @@ while cap.isOpened():
 
     active_theme = SUIT_THEMES[current_suit_key]
 
-    # 1. Process Face Mesh & Render Mask
+    # 1. Face Mesh for Angular Mask Lenses
     face_results = face_mesh.process(rgb_frame)
     if face_results.multi_face_landmarks:
         for face_landmarks in face_results.multi_face_landmarks:
             draw_photorealistic_mask(frame, face_landmarks, h, w, active_theme)
 
-    # 2. Process Hand Landmarks & Web Effects
+    # 2. Hand Tracking for Web Shooting
     hand_results = hands.process(rgb_frame)
     current_time = time.time()
 
@@ -310,7 +327,7 @@ while cap.isOpened():
                     latest = stuck_screen_webs[-1]
                     draw_cinematic_web_stream(frame, (wrist_x, wrist_y), (latest['x'], latest['y']))
 
-    # 3. Render Screen Impact Webs
+    # 3. Render Stuck Screen Webs
     active_webs = []
     for web in stuck_screen_webs:
         age = current_time - web['time']
@@ -321,12 +338,12 @@ while cap.isOpened():
 
     stuck_screen_webs = active_webs
 
-    # 4. HUD Suit Selector Indicator
+    # HUD Indicator
     cv2.rectangle(frame, (10, 10), (320, 50), (0, 0, 0), -1)
     cv2.putText(frame, f"SUIT: {active_theme['name']} [1-4]", (20, 38),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    cv2.imshow('Spider-Man Suit & Web Simulator', frame)
+    cv2.imshow('Spider-Man AR Camera', frame)
 
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
