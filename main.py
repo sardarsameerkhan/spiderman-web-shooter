@@ -5,15 +5,17 @@ import math
 import time
 import random
 
-# Access solutions safely across MediaPipe versions
+# Access MediaPipe solutions
 try:
     mp_hands = mp.solutions.hands
+    mp_face_mesh = mp.solutions.face_mesh
     mp_drawing = mp.solutions.drawing_utils
 except AttributeError:
     import mediapipe.python.solutions.hands as mp_hands
+    import mediapipe.python.solutions.face_mesh as mp_face_mesh
     import mediapipe.python.solutions.drawing_utils as mp_drawing
 
-# Setup Hands model
+# Setup Models
 hands = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=2,
@@ -21,62 +23,165 @@ hands = mp_hands.Hands(
     min_tracking_confidence=0.75
 )
 
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
+
 stuck_screen_webs = []
 
+# Suit Color Themes (BGR Color Format)
+SUIT_THEMES = {
+    '1': {  # Classic Parker
+        'name': 'Classic Red',
+        'mask_color': (25, 25, 195),
+        'rim_color': (10, 10, 10),
+        'lens_color': (245, 245, 245),
+        'web_color': (15, 15, 15),
+        'alpha': 0.65
+    },
+    '2': {  # Miles Morales
+        'name': 'Miles Morales (Stealth)',
+        'mask_color': (18, 18, 22),
+        'rim_color': (15, 15, 210),
+        'lens_color': (240, 240, 250),
+        'web_color': (20, 20, 180),
+        'alpha': 0.85
+    },
+    '3': {  # Iron Spider
+        'name': 'Iron Spider (Armor)',
+        'mask_color': (20, 20, 150),
+        'rim_color': (30, 190, 230), # Metallic Gold Rim
+        'lens_color': (220, 250, 255),
+        'web_color': (20, 160, 200),
+        'alpha': 0.70
+    },
+    '4': {  # Symbiote Black
+        'name': 'Symbiote Black',
+        'mask_color': (10, 10, 12),
+        'rim_color': (60, 60, 65),
+        'lens_color': (220, 220, 220),
+        'web_color': (40, 40, 45),
+        'alpha': 0.90
+    }
+}
+
+current_suit_key = '1'
+
 def is_open_palm(hand_landmarks):
-    """Detects fully open palm."""
+    """Detects open palm."""
     tips = [8, 12, 16, 20]
     pips = [6, 10, 14, 18]
     return all(hand_landmarks.landmark[tip].y < hand_landmarks.landmark[pip].y for tip, pip in zip(tips, pips))
 
 def is_spiderman_gesture(hand_landmarks):
-    """Detects Spider-Man gesture."""
+    """Detects Spider-Man thwip gesture."""
     index_open = hand_landmarks.landmark[8].y < hand_landmarks.landmark[6].y
     pinky_open = hand_landmarks.landmark[20].y < hand_landmarks.landmark[18].y
     middle_closed = hand_landmarks.landmark[12].y > hand_landmarks.landmark[10].y
     ring_closed = hand_landmarks.landmark[16].y > hand_landmarks.landmark[14].y
     return index_open and pinky_open and middle_closed and ring_closed
 
+def draw_photorealistic_mask(img, face_landmarks, h, w, theme):
+    """Generates a realistic 3D suit mask with dynamic lighting, eye lenses, and web matrix."""
+    pts = face_landmarks.landmark
+
+    # 1. Full Outer Face Contour Landmark Map
+    jaw_indices = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+    face_contour = np.array([(int(pts[i].x * w), int(pts[i].y * h)) for i in jaw_indices], np.int32)
+
+    # Shading Overlay Mask
+    mask_layer = img.copy()
+    cv2.fillPoly(mask_layer, [face_contour], theme['mask_color'])
+    
+    # Smooth alpha blending to retain natural skin lighting and jaw depth
+    cv2.addWeighted(mask_layer, theme['alpha'], img, 1.0 - theme['alpha'], 0, img)
+
+    # 2. Angular Spider-Man Eye Lenses (Left & Right)
+    left_eye_indices = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]
+    right_eye_indices = [362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382]
+
+    left_pts = np.array([(int(pts[i].x * w), int(pts[i].y * h)) for i in left_eye_indices], np.int32)
+    right_pts = np.array([(int(pts[i].x * w), int(pts[i].y * h)) for i in right_eye_indices], np.int32)
+
+    # Scale lenses to produce cinematic wide eyes
+    scale_poly = lambda poly, factor: np.int32((poly - np.mean(poly, axis=0)) * factor + np.mean(poly, axis=0))
+    l_lens_outer = scale_poly(left_pts, 1.65)
+    r_lens_outer = scale_poly(right_pts, 1.65)
+    
+    l_lens_inner = scale_poly(left_pts, 1.30)
+    r_lens_inner = scale_poly(right_pts, 1.30)
+
+    # Outer Thick Rim Frame
+    cv2.fillPoly(img, [l_lens_outer], theme['rim_color'])
+    cv2.fillPoly(img, [r_lens_outer], theme['rim_color'])
+
+    # Inner Reflective White Lens Surface
+    cv2.fillPoly(img, [l_lens_inner], theme['lens_color'])
+    cv2.fillPoly(img, [r_lens_inner], theme['lens_color'])
+
+    # Glass Lens Highlights
+    cv2.polylines(img, [l_lens_inner], True, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.polylines(img, [r_lens_inner], True, (255, 255, 255), 2, cv2.LINE_AA)
+
+    # 3. Facial Cobweb Mesh Lines
+    nose_x, nose_y = int(pts[1].x * w), int(pts[1].y * h)
+    web_anchors = [10, 109, 338, 297, 356, 454, 361, 152, 132, 234, 127, 67]
+    
+    anchor_coords = []
+    for idx in web_anchors:
+        ax, ay = int(pts[idx].x * w), int(pts[idx].y * h)
+        anchor_coords.append((ax, ay))
+        # Radial web spokes coming from nose bridge
+        cv2.line(img, (nose_x, nose_y), (ax, ay), theme['web_color'], 1, cv2.LINE_AA)
+
+    # Concentric curved web rings
+    num_anchors = len(anchor_coords)
+    for r in [0.30, 0.55, 0.80]:
+        ring_pts = []
+        for ax, ay in anchor_coords:
+            rx = int(nose_x + (ax - nose_x) * r)
+            ry = int(nose_y + (ay - nose_y) * r)
+            ring_pts.append((rx, ry))
+
+        for i in range(num_anchors):
+            p1 = ring_pts[i]
+            p2 = ring_pts[(i + 1) % num_anchors]
+            ctrl_x = int((p1[0] + p2[0]) * 0.45 + nose_x * 0.1)
+            ctrl_y = int((p1[1] + p2[1]) * 0.45 + nose_y * 0.1)
+            curve = np.array([p1, (ctrl_x, ctrl_y), p2], np.int32)
+            cv2.polylines(img, [curve], False, theme['web_color'], 1, cv2.LINE_AA)
+
 def draw_hand_palm_web(img, center, radius):
-    """Draws a complete realistic cobweb matrix over the open palm."""
+    """Draws palm web matrix."""
     cx, cy = center
     num_spokes = 8
     rings = 4
 
     cv2.circle(img, (cx, cy), int(radius * 1.1), (255, 255, 255), 1)
-
     spoke_angles = [i * (2 * math.pi / num_spokes) for i in range(num_spokes)]
-    
-    # Draw spokes
+
     for angle in spoke_angles:
         sx = int(cx + radius * math.cos(angle))
         sy = int(cy + radius * math.sin(angle))
         cv2.line(img, (cx, cy), (sx, sy), (240, 240, 255), 2)
 
-    # Curved spider web rings
     for r in range(1, rings + 1):
         r_dist = (radius / rings) * r
-        pts = []
-        for angle in spoke_angles:
-            rx = int(cx + r_dist * math.cos(angle))
-            ry = int(cy + r_dist * math.sin(angle))
-            pts.append((rx, ry))
+        pts = [(int(cx + r_dist * math.cos(a)), int(cy + r_dist * math.sin(a))) for a in spoke_angles]
 
         for i in range(num_spokes):
-            p1 = pts[i]
-            p2 = pts[(i + 1) % num_spokes]
+            p1, p2 = pts[i], pts[(i + 1) % num_spokes]
             mid_x = int((p1[0] + p2[0]) / 2 * 0.9 + cx * 0.1)
             mid_y = int((p1[1] + p2[1]) / 2 * 0.9 + cy * 0.1)
             cv2.polylines(img, [np.array([p1, (mid_x, mid_y), p2])], False, (220, 220, 255), 1, cv2.LINE_AA)
 
 def draw_cinematic_web_stream(img, start_pt, end_pt):
-    """
-    Renders realistic fluid web throwing with sine-wave turbulence 
-    and air particles along the trajectory.
-    """
+    """Renders turbulent web stream."""
     sx, sy = start_pt
     ex, ey = end_pt
-
     dist = math.hypot(ex - sx, ey - sy)
     if dist < 10:
         return
@@ -85,124 +190,74 @@ def draw_cinematic_web_stream(img, start_pt, end_pt):
     angle = math.atan2(ey - sy, ex - sx)
     perp_angle = angle + math.pi / 2
 
-    # Generate turbulent wavy web path points
     pts = []
     for i in range(num_pts + 1):
         t = i / num_pts
-        # Base straight position
-        px = sx + (ex - sx) * t
-        py = sy + (ey - sy) * t
-
-        # Wave displacement (higher amplitude in middle of the stream)
+        px, py = sx + (ex - sx) * t, sy + (ey - sy) * t
         wave = math.sin(t * math.pi * 3 + time.time() * 25) * (12 * math.sin(t * math.pi))
-        
-        final_x = int(px + wave * math.cos(perp_angle))
-        final_y = int(py + wave * math.sin(perp_angle))
-        pts.append((final_x, final_y))
+        pts.append((int(px + wave * math.cos(perp_angle)), int(py + wave * math.sin(perp_angle))))
 
-    # Convert to NumPy array for smooth polyline rendering
     pts_array = np.array(pts, np.int32)
-
-    # 1. Outer Glow / Secondary Strands
     cv2.polylines(img, [pts_array], False, (200, 220, 255), 4, cv2.LINE_AA)
-    # 2. Bright White Core Web Filament
     cv2.polylines(img, [pts_array], False, (255, 255, 255), 2, cv2.LINE_AA)
 
-    # 3. Flying Web Fluid Droplets / Air Particles along stream
     for i in range(1, num_pts, 2):
         pt = pts[i]
         if random.random() > 0.4:
-            offset_x = pt[0] + random.randint(-12, 12)
-            offset_y = pt[1] + random.randint(-12, 12)
+            offset_x, offset_y = pt[0] + random.randint(-12, 12), pt[1] + random.randint(-12, 12)
             cv2.circle(img, (offset_x, offset_y), random.randint(1, 3), (240, 240, 255), -1)
             cv2.line(img, pt, (offset_x, offset_y), (220, 220, 255), 1, cv2.LINE_AA)
 
 def create_photorealistic_splat(x, y):
-    """Generates procedural parameters for realistic web glass impact."""
+    """Generates screen impact web splat."""
     num_spokes = random.randint(9, 13)
     max_radius = random.randint(150, 220)
-    
     spokes = []
     for i in range(num_spokes):
         angle = i * (2 * math.pi / num_spokes) + random.uniform(-0.15, 0.15)
         length = random.uniform(max_radius * 0.6, max_radius)
-        ex = int(x + length * math.cos(angle))
-        ey = int(y + length * math.sin(angle))
-        spokes.append((ex, ey, angle, length))
+        spokes.append((int(x + length * math.cos(angle)), int(y + length * math.sin(angle)), angle, length))
 
-    # Splat micro-droplets
-    droplets = []
-    for _ in range(random.randint(18, 28)):
-        angle = random.uniform(0, 2 * math.pi)
-        dist = random.uniform(20, max_radius * 1.1)
-        dx = int(x + dist * math.cos(angle))
-        dy = int(y + dist * math.sin(angle))
-        size = random.randint(2, 5)
-        droplets.append((dx, dy, size))
+    droplets = [(int(x + random.uniform(20, max_radius * 1.1) * math.cos(a := random.uniform(0, 2 * math.pi))),
+                 int(y + random.uniform(20, max_radius * 1.1) * math.sin(a)),
+                 random.randint(2, 5)) for _ in range(random.randint(18, 28))]
 
-    return {
-        'x': x,
-        'y': y,
-        'radius': max_radius,
-        'spokes': spokes,
-        'droplets': droplets,
-        'time': time.time()
-    }
+    return {'x': x, 'y': y, 'radius': max_radius, 'spokes': spokes, 'droplets': droplets, 'time': time.time()}
 
 def draw_photorealistic_stuck_web(img, web, alpha):
-    """Renders layered 3D depth, drop shadows, and web curves."""
-    cx, cy = web['x'], web['y']
-    spokes = web['spokes']
+    """Renders 3D screen webs."""
+    cx, cy, spokes = web['x'], web['y'], web['spokes']
     num_spokes = len(spokes)
-
     overlay = img.copy()
 
-    # 1. Dark Drop Shadow (3D depth effect)
     shadow_offset = 3
     cv2.circle(overlay, (cx + shadow_offset, cy + shadow_offset), 24, (20, 20, 20), -1)
     for ex, ey, _, _ in spokes:
-        cv2.line(overlay, (cx + shadow_offset, cy + shadow_offset), 
-                 (ex + shadow_offset, ey + shadow_offset), (30, 30, 30), 3, cv2.LINE_AA)
+        cv2.line(overlay, (cx + shadow_offset, cy + shadow_offset), (ex + shadow_offset, ey + shadow_offset), (30, 30, 30), 3, cv2.LINE_AA)
 
-    # 2. Inner Concave Web Rings
     rings = 4
     for r in range(1, rings + 1):
-        ring_pts = []
-        for ex, ey, angle, length in spokes:
-            r_len = (length / rings) * r
-            rx = int(cx + r_len * math.cos(angle))
-            ry = int(cy + r_len * math.sin(angle))
-            ring_pts.append((rx, ry))
-
+        ring_pts = [(int(cx + (length / rings) * r * math.cos(angle)), int(cy + (length / rings) * r * math.sin(angle))) for _, _, angle, length in spokes]
         for i in range(num_spokes):
-            p1 = ring_pts[i]
-            p2 = ring_pts[(i + 1) % num_spokes]
-            
-            ctrl_x = int((p1[0] + p2[0]) * 0.45 + cx * 0.1)
-            ctrl_y = int((p1[1] + p2[1]) * 0.45 + cy * 0.1)
-            
-            curve_pts = np.array([p1, (ctrl_x, ctrl_y), p2], np.int32)
-            cv2.polylines(overlay, [curve_pts], False, (240, 240, 255), 2, cv2.LINE_AA)
+            p1, p2 = ring_pts[i], ring_pts[(i + 1) % num_spokes]
+            ctrl_x, ctrl_y = int((p1[0] + p2[0]) * 0.45 + cx * 0.1), int((p1[1] + p2[1]) * 0.45 + cy * 0.1)
+            cv2.polylines(overlay, [np.array([p1, (ctrl_x, ctrl_y), p2], np.int32)], False, (240, 240, 255), 2, cv2.LINE_AA)
 
-    # 3. Main Radial Spokes & Core Splat
     for ex, ey, _, _ in spokes:
         cv2.line(overlay, (cx, cy), (ex, ey), (255, 255, 255), 3, cv2.LINE_AA)
-        cv2.line(overlay, (cx, cy), (ex, ey), (200, 220, 255), 1, cv2.LINE_AA)
 
     cv2.circle(overlay, (cx, cy), 22, (255, 255, 255), -1)
-    cv2.circle(overlay, (cx, cy), 30, (210, 210, 255), 3, cv2.LINE_AA)
-
-    # 4. Splat Droplets
     for dx, dy, size in web['droplets']:
         cv2.circle(overlay, (dx, dy), size, (255, 255, 255), -1)
 
     cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
 
-# Camera setup
+# Main Loop
 cap = cv2.VideoCapture(0)
 last_shot_time = 0
 
-print("Cinematic Spider-Man Web Shooter Active. Press 'q' to quit.")
+print("Spider-Man Suite Switcher Active!")
+print("Press 1: Classic Red | 2: Miles Morales | 3: Iron Spider | 4: Symbiote | Q: Quit")
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -212,40 +267,41 @@ while cap.isOpened():
     frame = cv2.flip(frame, 1)
     h, w, c = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
-    results = hands.process(rgb_frame)
+
+    active_theme = SUIT_THEMES[current_suit_key]
+
+    # 1. Process Face Mesh & Render Mask
+    face_results = face_mesh.process(rgb_frame)
+    if face_results.multi_face_landmarks:
+        for face_landmarks in face_results.multi_face_landmarks:
+            draw_photorealistic_mask(frame, face_landmarks, h, w, active_theme)
+
+    # 2. Process Hand Landmarks & Web Effects
+    hand_results = hands.process(rgb_frame)
     current_time = time.time()
 
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            # Draw HUD Hand skeleton dots and lines
+    if hand_results.multi_hand_landmarks:
+        for hand_landmarks in hand_results.multi_hand_landmarks:
             mp_drawing.draw_landmarks(
-                frame, 
-                hand_landmarks, 
+                frame,
+                hand_landmarks,
                 mp_hands.HAND_CONNECTIONS,
                 mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=4),
                 mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2)
             )
 
-            palm_x = int(hand_landmarks.landmark[9].x * w)
-            palm_y = int(hand_landmarks.landmark[9].y * h)
-            wrist_x = int(hand_landmarks.landmark[0].x * w)
-            wrist_y = int(hand_landmarks.landmark[0].y * h)
+            palm_x, palm_y = int(hand_landmarks.landmark[9].x * w), int(hand_landmarks.landmark[9].y * h)
+            wrist_x, wrist_y = int(hand_landmarks.landmark[0].x * w), int(hand_landmarks.landmark[0].y * h)
 
-            # 1. Open Palm -> Web Matrix Charges
             if is_open_palm(hand_landmarks):
                 palm_size = int(math.hypot(palm_x - wrist_x, palm_y - wrist_y) * 1.5)
                 draw_hand_palm_web(frame, (palm_x, palm_y), max(40, palm_size))
 
-            # 2. Spider-Man Gesture -> Turbulent Web Shoot & Screen Impact
             elif is_spiderman_gesture(hand_landmarks):
                 if current_time - last_shot_time > 0.4:
-                    dx = palm_x - wrist_x
-                    dy = palm_y - wrist_y
+                    dx, dy = palm_x - wrist_x, palm_y - wrist_y
                     norm = math.hypot(dx, dy) + 1e-5
-                    
-                    target_x = int(w / 2 + (dx / norm) * 180)
-                    target_y = int(h / 2 + (dy / norm) * 180)
+                    target_x, target_y = int(w / 2 + (dx / norm) * 180), int(h / 2 + (dy / norm) * 180)
 
                     stuck_screen_webs.append(create_photorealistic_splat(target_x, target_y))
                     last_shot_time = current_time
@@ -254,7 +310,7 @@ while cap.isOpened():
                     latest = stuck_screen_webs[-1]
                     draw_cinematic_web_stream(frame, (wrist_x, wrist_y), (latest['x'], latest['y']))
 
-    # Render Stuck Screen Webs
+    # 3. Render Screen Impact Webs
     active_webs = []
     for web in stuck_screen_webs:
         age = current_time - web['time']
@@ -265,10 +321,18 @@ while cap.isOpened():
 
     stuck_screen_webs = active_webs
 
-    cv2.imshow('Spider-Man Web Shooter', frame)
+    # 4. HUD Suit Selector Indicator
+    cv2.rectangle(frame, (10, 10), (320, 50), (0, 0, 0), -1)
+    cv2.putText(frame, f"SUIT: {active_theme['name']} [1-4]", (20, 38),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    cv2.imshow('Spider-Man Suit & Web Simulator', frame)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
         break
+    elif chr(key) in ['1', '2', '3', '4']:
+        current_suit_key = chr(key)
 
 cap.release()
 cv2.destroyAllWindows()
